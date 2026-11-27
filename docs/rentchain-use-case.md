@@ -71,23 +71,28 @@ Cuando tenant y arbiter aceptan:
 - el landlord activa el acuerdo
 - el acuerdo pasa de `Draft` a `Active`
 
-### 4. Deposito
+### 4. Deposito de garantia
 
-El tenant deposita el monto requerido en el contrato `RentEscrow`.
+El tenant deposita la garantia en `RentEscrow`. Solo se puede depositar cuando el acuerdo
+esta `Active` y vinculado al escrow.
 
-### 5. Resolucion normal
+### 5. Devolucion normal
 
-Si no hay conflicto:
+Como en un alquiler tradicional, la garantia es del tenant:
 
-- el landlord libera el deposito segun el flujo acordado
+- el landlord puede devolverla en cualquier momento
+- el landlord solo puede cobrarla si el tenant lo autoriza
+- si el landlord no la devuelve ni abre una disputa hasta 7 dias despues
+  del fin del alquiler, el tenant la recupera
 
 ### 6. Disputa
 
-Si surge un conflicto:
+Si surge un conflicto (danos, deudas):
 
-- landlord o tenant abren disputa
+- landlord o tenant abren disputa (el landlord, hasta 7 dias despues del fin del alquiler)
 - los fondos quedan congelados
-- el arbiter decide a quien se liberan
+- el arbiter decide como se reparte (todo, nada o una parte para cada uno)
+- si el arbiter no resuelve en 30 dias, la garantia vuelve al tenant
 
 ### 7. Evidencia
 

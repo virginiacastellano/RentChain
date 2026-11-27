@@ -150,6 +150,30 @@ describe("RentEscrow", function () {
       expect(await token.balanceOf(await escrow.getAddress())).to.equal(depositAmount);
     });
 
+    it("rechaza tokens con comision por transferencia", async function () {
+      const [, landlord, tenant, arbiter] = await ethers.getSigners();
+      const feeToken = await (await ethers.getContractFactory("FeeOnTransferToken")).deploy();
+      const amount = ethers.parseUnits("1000", 18);
+      await feeToken.mint(tenant.address, amount);
+
+      const factory = await (await ethers.getContractFactory("RentChainFactory")).deploy();
+      const now = await time.latest();
+      await factory
+        .connect(landlord)
+        .createAgreement(await feeToken.getAddress(), tenant.address, arbiter.address, amount, "ipfs://x", now + DAY, now + 365 * DAY);
+      const rec = await factory.getAgreement(0);
+      const agreement = await ethers.getContractAt("RentContract", rec.agreement);
+      const escrow = await ethers.getContractAt("RentEscrow", rec.escrow);
+      await agreement.connect(tenant).acceptAsTenant();
+      await agreement.connect(arbiter).acceptAsArbiter();
+      await agreement.connect(landlord).activateAgreement();
+      await feeToken.connect(tenant).approve(rec.escrow, amount);
+
+      await expect(escrow.connect(tenant).deposit()).to.be.revertedWith(
+        "Fee-on-transfer tokens not supported"
+      );
+    });
+
     it("no permite depositar dos veces", async function () {
       const { escrow, tenant } = await loadFixture(fundedFixture);
 

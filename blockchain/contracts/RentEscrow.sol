@@ -175,7 +175,14 @@ contract RentEscrow {
 
         isDeposited = true;
 
+        // Se verifica que llegue el monto exacto: un token con comision
+        // dejaria al escrow con menos fondos de los que promete devolver.
+        uint256 balanceBefore = depositToken.balanceOf(address(this));
         depositToken.safeTransferFrom(msg.sender, address(this), depositAmount);
+        require(
+            depositToken.balanceOf(address(this)) - balanceBefore == depositAmount,
+            "Fee-on-transfer tokens not supported"
+        );
 
         emit Deposited(msg.sender, depositAmount);
     }
