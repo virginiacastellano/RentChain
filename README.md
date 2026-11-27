@@ -17,27 +17,42 @@
 
 ## 💡 Mi idea
 
-Alquilar suele depender de una inmobiliaria que cobra comisiones, guarda la garantía y decide cuando hay conflictos. Me pregunté: **¿y si el propietario y el inquilino pudieran hacerlo directamente, sin perder el respaldo legal?**
+Alquilar en Argentina es caro e injusto, sobre todo para el inquilino. Cuando alguien se muda tiene que pagar el último mes donde vivía, el depósito del nuevo alquiler, adelantos y además la comisión de la inmobiliaria. Encima, los contratos suelen redactarse a favor de quien los escribe.
 
-RentChain es un proyecto personal que nació de esa pregunta. La idea es que **todos salgan ganando**:
+Mi idea con RentChain es **sacar a la inmobiliaria del medio y que el contrato sea justo para las dos partes**:
 
-- 🏡 **El propietario** inicia el alquiler sin intermediarios y tiene una vía clara para reclamar si hay daños.
-- 🔑 **El inquilino** sabe que su garantía no la tiene nadie en el bolsillo: queda guardada en un contrato inteligente y vuelve a él al terminar, salvo que un árbitro decida otra cosa.
-- ⚖️ **Un escribano o árbitro verificado** por la plataforma resuelve las disputas. Su identidad real queda reservada frente a las partes, para que pueda decidir sin presiones.
+- 🏡 Para **el dueño**, que pone en manos de un desconocido algo que le costó, que pinta y que cuida.
+- 🔑 Para **el inquilino**, que hoy carga con casi todos los costos y con contratos que no negoció.
 
-El contrato firmado se guarda en IPFS y su referencia queda registrada en la blockchain: nadie puede modificarlo después.
+### Cómo lo imagino
+
+1. 👤 **Cada parte tiene su usuario.** El dueño publica la propiedad con todas sus fotos y su estado.
+2. 📸 **El inquilino visita el lugar y sube sus propias fotos.** Si lo que muestra el dueño y lo que ve el inquilino no coincide, queda registrado.
+3. 📝 **El contrato lo construyen los dos.** El dueño propone una versión y el inquilino sugiere correcciones.
+4. ⚖️ **Un escribano matriculado y anónimo revisa todo.** Compara las fotos, evalúa las discrepancias y aprueba el contrato con su criterio profesional. Ninguna de las partes sabe quién es, para que no haya presiones ni extorsiones. La plataforma sí lo conoce y valida que esté matriculado y habilitado; su identidad solo se revela si hay un problema legal.
+5. ✍️ **Ambos firman el contrato por la web.** El documento queda en IPFS y su referencia queda sellada en la blockchain: nadie puede modificarlo después.
+6. 💰 **Los montos, adelantos y la garantía se manejan con contratos inteligentes**, sin que nadie se quede con la plata en el bolsillo.
+
+### Lo que todavía estoy pensando
+
+- **Sin garantes.** Muchas veces el garante, cuando hay un problema, ya no tiene nada a su nombre y el trámite termina en abogados. Me gustaría reemplazarlo por un **fondo de garantía** o un **seguro de caución** integrado a la plataforma.
+- **Qué pasa si el inquilino deja de responder.** Cómo retener parte de la garantía para cubrir gastos de forma justa, sin perjudicar a quien cumple.
+
+### Qué está construido hoy
+
+La primera versión implementa el corazón del sistema: el **acuerdo** entre dueño, inquilino y escribano, y la **garantía en un escrow** que el escribano resuelve si hay conflicto. Las fotos, la co-redacción del contrato y las firmas web son los siguientes pasos (ver el roadmap).
 
 ## ⚙️ Cómo funciona
 
 ```mermaid
 flowchart LR
     A[🏡 Propietario<br/>crea el acuerdo] --> B[🔑 Inquilino<br/>acepta]
-    B --> C[⚖️ Árbitro<br/>acepta]
+    B --> C[⚖️ Escribano<br/>acepta]
     C --> D[Acuerdo activo]
     D --> E[💰 Inquilino deposita<br/>la garantía]
     E --> F{¿Hay conflicto?}
     F -- No --> G[La garantía vuelve<br/>al inquilino]
-    F -- Sí --> H[El árbitro decide<br/>cómo se reparte]
+    F -- Sí --> H[El escribano decide<br/>cómo se reparte]
     H -. Si no responde en 30 días .-> G
 ```
 
@@ -122,10 +137,14 @@ Corren automáticamente en GitHub Actions con cada cambio.
 - [x] Backend base: usuarios, autenticación y modelos
 - [x] Script de deploy (local y Sepolia)
 - [ ] Endpoints para propiedades, acuerdos y disputas
+- [ ] Subida de fotos del dueño y del inquilino a IPFS, y comparación por el escribano
+- [ ] Contrato co-redactado: propuesta del dueño y correcciones del inquilino
+- [ ] Firma web de ambas partes y aprobación del escribano on-chain
+- [ ] Validación de escribanos matriculados
 - [ ] Integración del backend con la blockchain (escuchar eventos con web3)
-- [ ] Subida real de documentos y evidencias a IPFS
+- [ ] Fondo de garantía o seguro de caución para reemplazar a los garantes
 - [ ] Frontend
-- [ ] Factory de contratos y posibilidad de reemplazar al árbitro
+- [ ] Factory de contratos y posibilidad de reemplazar al escribano
 
 ---
 
