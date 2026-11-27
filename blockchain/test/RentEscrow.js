@@ -1,25 +1,30 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
-describe("RentEscrow", function () {
+describe("RentEscrow (deposito de garantia)", function () {
+  const DAY = 24 * 60 * 60;
+  const CLAIM_WINDOW = 7 * DAY;
+  const ARBITER_TIMEOUT = 30 * DAY;
+
+  /*
+   * Escenario base:
+   * - owner despliega el token mock
+   * - landlord crea escrow y acuerdo, tenant y arbiter aceptan
+   * - el acuerdo queda activo y vinculado al escrow
+   * - el alquiler dura 365 dias desde hoy
+   */
   async function deployFixture() {
-    // owner deploya el token mock
-    // landlord es el propietario
-    // tenant es el inquilino
-    // arbiter resuelve disputas
-    // other es una cuenta externa cualquiera
     const [owner, landlord, tenant, arbiter, other] = await ethers.getSigners();
 
     const MockUSDT = await ethers.getContractFactory("MockUSDT");
-    const token = await MockUSDT.deploy();
+    const token = await MockUSDT.connect(owner).deploy();
 
     const depositAmount = ethers.parseUnits("1000", 18);
-
-    // Damos tokens al inquilino para poder depositar.
     await token.mint(tenant.address, depositAmount);
 
     const RentEscrow = await ethers.getContractFactory("RentEscrow");
-    const escrow = await RentEscrow.deploy(
+    const escrow = await RentEscrow.connect(landlord).deploy(
       await token.getAddress(),
       landlord.address,
       tenant.address,
@@ -27,158 +32,310 @@ describe("RentEscrow", function () {
       depositAmount
     );
 
-    return {
-      token,
-      escrow,
-      owner,
-      landlord,
-      tenant,
-      arbiter,
-      other,
-      depositAmount,
-    };
+    const now = await time.latest();
+    const startDate = now + DAY;
+    const endDate = startDate + 365 * DAY;
+
+    const RentContract = await ethers.getContractFactory("RentContract");
+    const agreement = await RentContract.connect(landlord).deploy(
+      tenant.address,
+      arbiter.address,
+      await escrow.getAddress(),
+      "ipfs://rentchain-contract-v1",
+      startDate,
+      endDate
+    );
+
+    return { token, escrow, agreement, owner, landlord, tenant, arbiter, other, depositAmount, endDate };
   }
 
-  it("debe guardar correctamente los parametros iniciales", async function () {
-    const { token, escrow, landlord, tenant, arbiter, depositAmount } = await deployFixture();
+  async function activeFixture() {
+    const ctx = await deployFixture();
+    const { escrow, agreement, landlord, tenant, arbiter } = ctx;
 
-    expect(await escrow.depositToken()).to.equal(await token.getAddress());
-    expect(await escrow.landlord()).to.equal(landlord.address);
-    expect(await escrow.tenant()).to.equal(tenant.address);
-    expect(await escrow.arbiter()).to.equal(arbiter.address);
-    expect(await escrow.depositAmount()).to.equal(depositAmount);
-  });
+    await agreement.connect(tenant).acceptAsTenant();
+    await agreement.connect(arbiter).acceptAsArbiter();
+    await agreement.connect(landlord).activateAgreement();
+    await escrow.connect(landlord).linkAgreement(await agreement.getAddress());
 
-  it("debe permitir que solo el inquilino haga el deposito", async function () {
-    const { escrow, other } = await deployFixture();
+    return ctx;
+  }
 
-    await expect(escrow.connect(other).deposit()).to.be.revertedWith(
-      "Only tenant can call this"
-    );
-  });
-
-  it("debe mover los tokens al contrato cuando el inquilino deposita", async function () {
-    const { token, escrow, tenant, depositAmount } = await deployFixture();
+  async function depositedFixture() {
+    const ctx = await activeFixture();
+    const { token, escrow, tenant, depositAmount } = ctx;
 
     await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
     await escrow.connect(tenant).deposit();
 
-    expect(await escrow.isDeposited()).to.equal(true);
-    expect(await token.balanceOf(await escrow.getAddress())).to.equal(depositAmount);
-    expect(await escrow.contractBalance()).to.equal(depositAmount);
+    return ctx;
+  }
+
+  async function disputedFixture() {
+    const ctx = await depositedFixture();
+    await ctx.escrow.connect(ctx.landlord).openDispute();
+    return ctx;
+  }
+
+  // ---------------------------------------------------------------
+  // Configuracion y vinculo con el acuerdo
+  // ---------------------------------------------------------------
+
+  describe("Configuracion", function () {
+    it("guarda correctamente los parametros iniciales", async function () {
+      const { token, escrow, landlord, tenant, arbiter, depositAmount } = await loadFixture(deployFixture);
+
+      expect(await escrow.depositToken()).to.equal(await token.getAddress());
+      expect(await escrow.landlord()).to.equal(landlord.address);
+      expect(await escrow.tenant()).to.equal(tenant.address);
+      expect(await escrow.arbiter()).to.equal(arbiter.address);
+      expect(await escrow.depositAmount()).to.equal(depositAmount);
+      expect(await escrow.state()).to.equal(0); // AwaitingDeposit
+    });
+
+    it("solo el landlord puede vincular el acuerdo", async function () {
+      const { escrow, agreement, other } = await loadFixture(deployFixture);
+
+      await expect(
+        escrow.connect(other).linkAgreement(await agreement.getAddress())
+      ).to.be.revertedWith("Only landlord can call this");
+    });
+
+    it("no permite vincular el acuerdo dos veces", async function () {
+      const { escrow, agreement, landlord } = await loadFixture(activeFixture);
+
+      await expect(
+        escrow.connect(landlord).linkAgreement(await agreement.getAddress())
+      ).to.be.revertedWith("Agreement already linked");
+    });
+
+    it("rechaza un acuerdo que apunta a otro escrow", async function () {
+      const { escrow, landlord, tenant, arbiter, endDate } = await loadFixture(deployFixture);
+
+      const RentContract = await ethers.getContractFactory("RentContract");
+      const otherAgreement = await RentContract.connect(landlord).deploy(
+        tenant.address,
+        arbiter.address,
+        tenant.address, // escrow equivocado
+        "ipfs://otro",
+        endDate - 10 * DAY,
+        endDate
+      );
+
+      await expect(
+        escrow.connect(landlord).linkAgreement(await otherAgreement.getAddress())
+      ).to.be.revertedWith("Agreement points to another escrow");
+    });
   });
 
-  it("no debe permitir depositar dos veces", async function () {
-    const { token, escrow, tenant, depositAmount } = await deployFixture();
+  // ---------------------------------------------------------------
+  // Deposito
+  // ---------------------------------------------------------------
 
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
+  describe("Deposito", function () {
+    it("no permite depositar si el acuerdo no esta vinculado", async function () {
+      const { escrow, tenant } = await loadFixture(deployFixture);
 
-    await expect(escrow.connect(tenant).deposit()).to.be.revertedWith(
-      "Deposit already made"
-    );
+      await expect(escrow.connect(tenant).deposit()).to.be.revertedWith("Agreement not linked");
+    });
+
+    it("no permite depositar si el acuerdo no esta activo", async function () {
+      const { token, escrow, agreement, landlord, tenant, depositAmount } = await loadFixture(deployFixture);
+
+      await escrow.connect(landlord).linkAgreement(await agreement.getAddress());
+      await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
+
+      await expect(escrow.connect(tenant).deposit()).to.be.revertedWith("Agreement is not active");
+    });
+
+    it("solo el tenant puede depositar", async function () {
+      const { escrow, other } = await loadFixture(activeFixture);
+
+      await expect(escrow.connect(other).deposit()).to.be.revertedWith("Only tenant can call this");
+    });
+
+    it("mueve la garantia al contrato", async function () {
+      const { token, escrow, depositAmount } = await loadFixture(depositedFixture);
+
+      expect(await escrow.state()).to.equal(1); // Deposited
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(depositAmount);
+    });
+
+    it("no permite depositar dos veces", async function () {
+      const { escrow, tenant } = await loadFixture(depositedFixture);
+
+      await expect(escrow.connect(tenant).deposit()).to.be.revertedWith("Invalid escrow state");
+    });
+
+    it("no permite depositar despues de que termino el alquiler", async function () {
+      const { token, escrow, tenant, depositAmount, endDate } = await loadFixture(activeFixture);
+
+      await time.increaseTo(endDate);
+      await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
+
+      await expect(escrow.connect(tenant).deposit()).to.be.revertedWith("Rental already ended");
+    });
   });
 
-  it("debe permitir que el propietario libere el deposito si no hay disputa", async function () {
-    const { token, escrow, landlord, tenant, depositAmount } = await deployFixture();
+  // ---------------------------------------------------------------
+  // Devolucion normal de la garantia
+  // ---------------------------------------------------------------
 
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
+  describe("Devolucion de la garantia", function () {
+    it("nadie puede devolverla al tenant antes de que venza el plazo de reclamo, salvo el landlord", async function () {
+      const { escrow, tenant, other, endDate } = await loadFixture(depositedFixture);
 
-    await escrow.connect(landlord).releaseToLandlord();
+      await time.increaseTo(endDate + CLAIM_WINDOW - 60);
 
-    expect(await escrow.isReleased()).to.equal(true);
-    expect(await token.balanceOf(landlord.address)).to.equal(depositAmount);
-    expect(await token.balanceOf(await escrow.getAddress())).to.equal(0n);
+      await expect(escrow.connect(tenant).returnDeposit()).to.be.revertedWith("Claim window still open");
+      await expect(escrow.connect(other).returnDeposit()).to.be.revertedWith("Claim window still open");
+    });
+
+    it("el landlord puede devolverla antes, renunciando a reclamar", async function () {
+      const { token, escrow, landlord, tenant, depositAmount } = await loadFixture(depositedFixture);
+
+      await expect(escrow.connect(landlord).returnDeposit())
+        .to.emit(escrow, "DepositReturned")
+        .withArgs(tenant.address, depositAmount);
+
+      expect(await token.balanceOf(tenant.address)).to.equal(depositAmount);
+      expect(await escrow.state()).to.equal(3); // Closed
+    });
+
+    it("vencido el plazo sin disputa, vuelve al tenant aunque el landlord no haga nada", async function () {
+      const { token, escrow, tenant, depositAmount, endDate } = await loadFixture(depositedFixture);
+
+      await time.increaseTo(endDate + CLAIM_WINDOW + 1);
+      await escrow.connect(tenant).returnDeposit();
+
+      expect(await token.balanceOf(tenant.address)).to.equal(depositAmount);
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(0n);
+    });
+
+    it("el landlord ya no puede llevarse la garantia por su cuenta", async function () {
+      const { escrow } = await loadFixture(depositedFixture);
+
+      expect(escrow.releaseToLandlord).to.equal(undefined);
+    });
   });
 
-  it("no debe permitir liberar si todavia no hubo deposito", async function () {
-    const { escrow, landlord } = await deployFixture();
+  // ---------------------------------------------------------------
+  // Disputas
+  // ---------------------------------------------------------------
 
-    await expect(escrow.connect(landlord).releaseToLandlord()).to.be.revertedWith(
-      "Deposit not made yet"
-    );
+  describe("Disputas", function () {
+    it("landlord o tenant pueden abrir una disputa", async function () {
+      const { escrow, tenant } = await loadFixture(depositedFixture);
+
+      await expect(escrow.connect(tenant).openDispute())
+        .to.emit(escrow, "DisputeOpened")
+        .withArgs(tenant.address);
+      expect(await escrow.state()).to.equal(2); // Disputed
+    });
+
+    it("una cuenta externa no puede abrir disputa", async function () {
+      const { escrow, other } = await loadFixture(depositedFixture);
+
+      await expect(escrow.connect(other).openDispute()).to.be.revertedWith("Only participant can call this");
+    });
+
+    it("no se puede abrir disputa sin deposito", async function () {
+      const { escrow, landlord } = await loadFixture(activeFixture);
+
+      await expect(escrow.connect(landlord).openDispute()).to.be.revertedWith("Invalid escrow state");
+    });
+
+    it("no se puede abrir disputa despues del plazo de reclamo", async function () {
+      const { escrow, landlord, endDate } = await loadFixture(depositedFixture);
+
+      await time.increaseTo(endDate + CLAIM_WINDOW + 1);
+
+      await expect(escrow.connect(landlord).openDispute()).to.be.revertedWith("Claim window is over");
+    });
+
+    it("con disputa abierta no se puede devolver la garantia por la via normal", async function () {
+      const { escrow, landlord } = await loadFixture(disputedFixture);
+
+      await expect(escrow.connect(landlord).returnDeposit()).to.be.revertedWith("Invalid escrow state");
+    });
+
+    it("el arbiter puede repartir la garantia (ej. 300 por danos, 700 al tenant)", async function () {
+      const { token, escrow, landlord, tenant, arbiter } = await loadFixture(disputedFixture);
+
+      const toLandlord = ethers.parseUnits("300", 18);
+      const toTenant = ethers.parseUnits("700", 18);
+
+      await expect(escrow.connect(arbiter).resolveDispute(toLandlord))
+        .to.emit(escrow, "DisputeResolved")
+        .withArgs(arbiter.address, toLandlord, toTenant);
+
+      expect(await token.balanceOf(landlord.address)).to.equal(toLandlord);
+      expect(await token.balanceOf(tenant.address)).to.equal(toTenant);
+      expect(await escrow.state()).to.equal(3); // Closed
+    });
+
+    it("el arbiter puede resolver todo a favor del landlord", async function () {
+      const { token, escrow, landlord, arbiter, depositAmount } = await loadFixture(disputedFixture);
+
+      await escrow.connect(arbiter).resolveToLandlord();
+
+      expect(await token.balanceOf(landlord.address)).to.equal(depositAmount);
+    });
+
+    it("el arbiter puede resolver todo a favor del tenant", async function () {
+      const { token, escrow, tenant, arbiter, depositAmount } = await loadFixture(disputedFixture);
+
+      await escrow.connect(arbiter).resolveToTenant();
+
+      expect(await token.balanceOf(tenant.address)).to.equal(depositAmount);
+    });
+
+    it("el arbiter no puede asignar mas que la garantia", async function () {
+      const { escrow, arbiter, depositAmount } = await loadFixture(disputedFixture);
+
+      await expect(escrow.connect(arbiter).resolveDispute(depositAmount + 1n)).to.be.revertedWith(
+        "Amount exceeds deposit"
+      );
+    });
+
+    it("solo el arbiter puede resolver", async function () {
+      const { escrow, landlord, other } = await loadFixture(disputedFixture);
+
+      await expect(escrow.connect(landlord).resolveToLandlord()).to.be.revertedWith("Only arbiter can call this");
+      await expect(escrow.connect(other).resolveDispute(0)).to.be.revertedWith("Only arbiter can call this");
+    });
   });
 
-  it("no debe permitir que una cuenta externa libere el deposito", async function () {
-    const { token, escrow, tenant, other, depositAmount } = await deployFixture();
+  // ---------------------------------------------------------------
+  // Arbiter que no responde
+  // ---------------------------------------------------------------
 
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
+  describe("Arbiter que no responde", function () {
+    it("antes del plazo, nadie puede reclamar", async function () {
+      const { escrow, tenant } = await loadFixture(disputedFixture);
 
-    await expect(escrow.connect(other).releaseToLandlord()).to.be.revertedWith(
-      "Only landlord can call this"
-    );
-  });
+      await time.increase(ARBITER_TIMEOUT - 60);
 
-  it("debe permitir abrir una disputa a landlord o tenant", async function () {
-    const { token, escrow, tenant, landlord, depositAmount } = await deployFixture();
+      await expect(escrow.connect(tenant).claimAfterArbiterTimeout()).to.be.revertedWith("Arbiter still has time");
+    });
 
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
+    it("vencido el plazo, la garantia vuelve al tenant", async function () {
+      const { token, escrow, tenant, other, depositAmount } = await loadFixture(disputedFixture);
 
-    await escrow.connect(landlord).openDispute();
+      await time.increase(ARBITER_TIMEOUT + 1);
+      await escrow.connect(other).claimAfterArbiterTimeout();
 
-    expect(await escrow.isDisputed()).to.equal(true);
-  });
+      expect(await token.balanceOf(tenant.address)).to.equal(depositAmount);
+      expect(await escrow.state()).to.equal(3); // Closed
+    });
 
-  it("no debe permitir abrir disputa sin deposito", async function () {
-    const { escrow, tenant } = await deployFixture();
+    it("una vez cerrado, el arbiter ya no puede resolver", async function () {
+      const { escrow, arbiter } = await loadFixture(disputedFixture);
 
-    await expect(escrow.connect(tenant).openDispute()).to.be.revertedWith(
-      "Deposit not made yet"
-    );
-  });
+      await time.increase(ARBITER_TIMEOUT + 1);
+      await escrow.claimAfterArbiterTimeout();
 
-  it("no debe permitir liberar normalmente si hay disputa", async function () {
-    const { token, escrow, tenant, landlord, depositAmount } = await deployFixture();
-
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
-    await escrow.connect(tenant).openDispute();
-
-    await expect(escrow.connect(landlord).releaseToLandlord()).to.be.revertedWith(
-      "Escrow is under dispute"
-    );
-  });
-
-  it("debe permitir que el arbitro resuelva a favor del propietario", async function () {
-    const { token, escrow, tenant, landlord, arbiter, depositAmount } = await deployFixture();
-
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
-    await escrow.connect(tenant).openDispute();
-
-    await escrow.connect(arbiter).resolveToLandlord();
-
-    expect(await escrow.isReleased()).to.equal(true);
-    expect(await escrow.isDisputed()).to.equal(false);
-    expect(await token.balanceOf(landlord.address)).to.equal(depositAmount);
-  });
-
-  it("debe permitir que el arbitro resuelva a favor del inquilino", async function () {
-    const { token, escrow, tenant, arbiter, depositAmount } = await deployFixture();
-
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
-    await escrow.connect(tenant).openDispute();
-
-    await escrow.connect(arbiter).resolveToTenant();
-
-    expect(await escrow.isReleased()).to.equal(true);
-    expect(await escrow.isDisputed()).to.equal(false);
-    expect(await token.balanceOf(tenant.address)).to.equal(depositAmount);
-  });
-
-  it("no debe permitir que una cuenta externa resuelva la disputa", async function () {
-    const { token, escrow, tenant, other, depositAmount } = await deployFixture();
-
-    await token.connect(tenant).approve(await escrow.getAddress(), depositAmount);
-    await escrow.connect(tenant).deposit();
-    await escrow.connect(tenant).openDispute();
-
-    await expect(escrow.connect(other).resolveToLandlord()).to.be.revertedWith(
-      "Only arbiter can call this"
-    );
+      await expect(escrow.connect(arbiter).resolveToLandlord()).to.be.revertedWith("Invalid escrow state");
+    });
   });
 });

@@ -4,18 +4,34 @@ from types import SimpleNamespace
 from app.main import app
 from app.api.deps import get_current_user, get_db
 from app.api.routes import auth as auth_routes
+from app.core.exceptions import UnauthorizedException
 
 client = TestClient(app)
 
 
 def test_login_returns_401_for_invalid_credentials() -> None:
-    response = client.post(
-        "/auth/login",
-        data={
-            "username": "noexiste@example.com",
-            "password": "incorrecta",
-        },
-    )
+    # Simulamos la base y el service para que el test no dependa de PostgreSQL.
+    def override_get_db():
+        yield object()
+
+    def fake_login_user(db: object, email: str, password: str) -> str:
+        raise UnauthorizedException()
+
+    app.dependency_overrides[get_db] = override_get_db
+    original_login_user = auth_routes.login_user
+    auth_routes.login_user = fake_login_user
+
+    try:
+        response = client.post(
+            "/auth/login",
+            data={
+                "username": "noexiste@example.com",
+                "password": "incorrecta",
+            },
+        )
+    finally:
+        auth_routes.login_user = original_login_user
+        app.dependency_overrides.clear()
 
     assert response.status_code == 401
     assert response.json() == {
