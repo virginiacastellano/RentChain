@@ -15,6 +15,9 @@ pragma solidity ^0.8.20;
  * - define tenant y arbiter
  * - referencia el documento firmado (hash IPFS)
  * - referencia el escrow que guardara el deposito
+ *
+ * El landlord se recibe por parametro para que el acuerdo pueda crearse
+ * desde RentChainFactory en una sola transaccion.
  */
 contract RentContract {
     enum AgreementStatus {
@@ -23,7 +26,7 @@ contract RentContract {
         Cancelled
     }
 
-    // El landlord inicia el contrato al desplegarlo.
+    // El landlord inicia el acuerdo.
     address public immutable landlord;
 
     // Los otros actores quedan definidos explicitamente desde el inicio.
@@ -74,6 +77,7 @@ contract RentContract {
     }
 
     constructor(
+        address _landlord,
         address _tenant,
         address _arbiter,
         address _escrowAddress,
@@ -81,17 +85,18 @@ contract RentContract {
         uint256 _startDate,
         uint256 _endDate
     ) {
+        require(_landlord != address(0), "Invalid landlord address");
         require(_tenant != address(0), "Invalid tenant address");
         require(_arbiter != address(0), "Invalid arbiter address");
         require(_escrowAddress != address(0), "Invalid escrow address");
         require(bytes(_ipfsDocumentHash).length > 0, "Document hash is required");
         require(_startDate > 0, "Start date is required");
         require(_endDate > _startDate, "End date must be greater than start date");
-        require(msg.sender != _tenant, "Landlord and tenant must differ");
-        require(msg.sender != _arbiter, "Landlord and arbiter must differ");
+        require(_landlord != _tenant, "Landlord and tenant must differ");
+        require(_landlord != _arbiter, "Landlord and arbiter must differ");
         require(_tenant != _arbiter, "Tenant and arbiter must differ");
 
-        landlord = msg.sender;
+        landlord = _landlord;
         tenant = _tenant;
         arbiter = _arbiter;
         escrowAddress = _escrowAddress;
@@ -104,7 +109,6 @@ contract RentContract {
 
     /*
      * El tenant confirma que acepta participar del acuerdo.
-     * Esto modela la invitacion/aceptacion que luego la app puede mostrar.
      */
     function acceptAsTenant() external onlyTenant onlyWhileDraft {
         require(!tenantAccepted, "Tenant already accepted");
@@ -148,7 +152,8 @@ contract RentContract {
 
     /*
      * Permite actualizar el hash del documento mientras el acuerdo no este activo.
-     * Es util si el landlord corrige el PDF antes de la aceptacion final.
+     * Si el documento cambia, las aceptaciones previas se invalidan: tenant y
+     * arbiter tienen que volver a aceptar el documento nuevo.
      */
     function updateDocumentHash(string memory _newIpfsDocumentHash)
         external
@@ -158,6 +163,8 @@ contract RentContract {
         require(bytes(_newIpfsDocumentHash).length > 0, "Document hash is required");
 
         ipfsDocumentHash = _newIpfsDocumentHash;
+        tenantAccepted = false;
+        arbiterAccepted = false;
 
         emit DocumentHashUpdated(_newIpfsDocumentHash);
     }

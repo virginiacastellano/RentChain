@@ -25,15 +25,14 @@ def login_user(db: Session, email: str, password: str) -> str:
     return create_access_token(subject=user.email)
 
 
-def request_password_reset(db: Session, email: str) -> str:
+def request_password_reset(db: Session, email: str) -> str | None:
     # El service genera un token de recuperacion solo si el usuario existe.
+    # Si no existe devuelve None, sin error: la API responde igual en ambos
+    # casos para no revelar que emails estan registrados.
     user = get_user_by_email(db, email)
 
     if not user:
-        raise NotFoundException(
-            detail="User not found",
-            error_code="user_not_found",
-        )
+        return None
 
     return create_password_reset_token(subject=user.email)
 

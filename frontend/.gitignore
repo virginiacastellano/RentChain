@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Generado por blockchain/scripts/deploy.js (direcciones de la red local)
+public/deployment.json

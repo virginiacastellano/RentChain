@@ -5,15 +5,47 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /*
- * RentEscrow v2
+ * Vista minima de RentContract que necesita el escrow.
+ */
+interface IRentContract {
+    function landlord() external view returns (address);
+    function tenant() external view returns (address);
+    function arbiter() external view returns (address);
+    function escrowAddress() external view returns (address);
+    function endDate() external view returns (uint256);
+    function status() external view returns (uint8);
+}
+
+/*
+ * RentEscrow v3
  *
- * Esta version agrega una disputa basica:
- * - landlord o tenant pueden abrir disputa
- * - mientras hay disputa, el flujo normal se congela
- * - un arbitro simple decide a quien se liberan los fondos
+ * Guarda el deposito en garantia del alquiler (token ERC20).
+ *
+ * Reglas:
+ * - el escrow se vincula una sola vez a su RentContract
+ * - el tenant solo puede depositar si el acuerdo esta Active
+ * - flujo normal: el landlord devuelve el deposito al tenant
+ * - si el tenant lo autoriza, el landlord puede cobrar el deposito
+ * - si el landlord no actua, el tenant recupera el deposito despues de
+ *   endDate + CLAIM_WINDOW
+ * - en disputa, el arbiter decide (todo a una parte o reparto)
+ * - si el arbiter no resuelve en DISPUTE_TIMEOUT, el tenant recupera el deposito
+ *
+ * Todas las funciones que mueven dinero actualizan el estado antes de transferir
+ * (checks-effects-interactions) y usan SafeERC20.
  */
 contract RentEscrow {
     using SafeERC20 for IERC20;
+
+    // Estado del acuerdo en RentContract que habilita el deposito.
+    uint8 private constant AGREEMENT_ACTIVE = 1;
+
+    // Plazo que tiene el landlord, despues del fin del alquiler, para devolver
+    // el deposito o abrir una disputa.
+    uint256 public constant CLAIM_WINDOW = 7 days;
+
+    // Plazo maximo que tiene el arbiter para resolver una disputa.
+    uint256 public constant DISPUTE_TIMEOUT = 30 days;
 
     // Token ERC20 usado para el deposito.
     IERC20 public immutable depositToken;
@@ -21,23 +53,34 @@ contract RentEscrow {
     // Participantes del acuerdo.
     address public immutable landlord;
     address public immutable tenant;
-
-    // Arbitro simple para esta primera version.
     address public immutable arbiter;
 
     // Monto del deposito.
     uint256 public immutable depositAmount;
 
+    // Cuenta que desplegó el escrow y puede vincularlo al acuerdo (una vez).
+    address public immutable deployer;
+
+    // Acuerdo legal asociado.
+    IRentContract public agreement;
+
     // Estados principales del contrato.
     bool public isDeposited;
     bool public isReleased;
     bool public isDisputed;
+    bool public tenantApprovedRelease;
+    uint256 public disputeOpenedAt;
 
+    event AgreementLinked(address indexed agreement);
     event Deposited(address indexed tenant, uint256 amount);
+    event ReturnedToTenant(address indexed by, uint256 amount);
+    event ReleaseApprovedByTenant(address indexed tenant);
     event Released(address indexed landlord, uint256 amount);
     event DisputeOpened(address indexed openedBy);
     event ResolvedToLandlord(address indexed arbiter, uint256 amount);
     event ResolvedToTenant(address indexed arbiter, uint256 amount);
+    event ResolvedSplit(address indexed arbiter, uint256 toLandlord, uint256 toTenant);
+    event DisputeTimedOut(address indexed tenant, uint256 amount);
 
     modifier onlyTenant() {
         require(msg.sender == tenant, "Only tenant can call this");
@@ -62,6 +105,21 @@ contract RentEscrow {
         _;
     }
 
+    // Hay deposito, no hay disputa y los fondos siguen en el contrato.
+    modifier whenFundedWithoutDispute() {
+        require(isDeposited, "Deposit not made yet");
+        require(!isReleased, "Escrow already released");
+        require(!isDisputed, "Escrow is under dispute");
+        _;
+    }
+
+    // Hay una disputa abierta y los fondos siguen en el contrato.
+    modifier whenDisputed() {
+        require(isDisputed, "No active dispute");
+        require(!isReleased, "Escrow already released");
+        _;
+    }
+
     constructor(
         address _depositToken,
         address _landlord,
@@ -83,14 +141,37 @@ contract RentEscrow {
         tenant = _tenant;
         arbiter = _arbiter;
         depositAmount = _depositAmount;
+        deployer = msg.sender;
+    }
+
+    /*
+     * Vincula el escrow con su RentContract. Solo una vez y solo si el acuerdo
+     * apunta a este escrow y tiene exactamente los mismos participantes.
+     */
+    function linkAgreement(address _agreement) external {
+        require(msg.sender == deployer, "Only deployer can link");
+        require(address(agreement) == address(0), "Agreement already linked");
+        require(_agreement != address(0), "Invalid agreement address");
+
+        IRentContract candidate = IRentContract(_agreement);
+        require(candidate.escrowAddress() == address(this), "Agreement points to another escrow");
+        require(candidate.landlord() == landlord, "Landlord mismatch");
+        require(candidate.tenant() == tenant, "Tenant mismatch");
+        require(candidate.arbiter() == arbiter, "Arbiter mismatch");
+
+        agreement = candidate;
+
+        emit AgreementLinked(_agreement);
     }
 
     /*
      * El inquilino deposita exactamente el monto acordado.
+     * Solo es posible con el acuerdo vinculado y activo.
      */
     function deposit() external onlyTenant {
+        require(address(agreement) != address(0), "Agreement not linked");
+        require(agreement.status() == AGREEMENT_ACTIVE, "Agreement is not active");
         require(!isDeposited, "Deposit already made");
-        require(!isReleased, "Escrow already released");
 
         isDeposited = true;
 
@@ -100,14 +181,34 @@ contract RentEscrow {
     }
 
     /*
-     * Flujo normal: el propietario libera el deposito.
-     *
-     * Si hay disputa, esta funcion ya no puede usarse.
+     * Flujo normal: el landlord devuelve el deposito al inquilino.
      */
-    function releaseToLandlord() external onlyLandlord {
-        require(isDeposited, "Deposit not made yet");
-        require(!isReleased, "Escrow already released");
-        require(!isDisputed, "Escrow is under dispute");
+    function returnToTenant() external onlyLandlord whenFundedWithoutDispute {
+        isReleased = true;
+
+        depositToken.safeTransfer(tenant, depositAmount);
+
+        emit ReturnedToTenant(msg.sender, depositAmount);
+    }
+
+    /*
+     * El inquilino autoriza que el landlord cobre el deposito
+     * (por ejemplo, para cubrir un mes adeudado o un arreglo acordado).
+     */
+    function approveReleaseToLandlord() external onlyTenant whenFundedWithoutDispute {
+        require(!tenantApprovedRelease, "Release already approved");
+
+        tenantApprovedRelease = true;
+
+        emit ReleaseApprovedByTenant(msg.sender);
+    }
+
+    /*
+     * El landlord cobra el deposito, solo con autorizacion del inquilino.
+     * Sin autorizacion, el camino es abrir una disputa.
+     */
+    function releaseToLandlord() external onlyLandlord whenFundedWithoutDispute {
+        require(tenantApprovedRelease, "Tenant has not approved the release");
 
         isReleased = true;
 
@@ -117,15 +218,30 @@ contract RentEscrow {
     }
 
     /*
-     * Landlord o tenant pueden abrir disputa solo si ya existe deposito
-     * y el escrow aun no fue resuelto.
+     * Si el landlord no devolvio el deposito ni abrio disputa dentro de
+     * CLAIM_WINDOW despues del fin del alquiler, el inquilino lo recupera.
      */
-    function openDispute() external onlyParticipant {
-        require(isDeposited, "Deposit not made yet");
-        require(!isReleased, "Escrow already released");
-        require(!isDisputed, "Dispute already opened");
+    function claimAfterEnd() external onlyTenant whenFundedWithoutDispute {
+        require(block.timestamp >= claimableAt(), "Claim window still open");
+
+        isReleased = true;
+
+        depositToken.safeTransfer(tenant, depositAmount);
+
+        emit ReturnedToTenant(msg.sender, depositAmount);
+    }
+
+    /*
+     * Landlord o tenant pueden abrir disputa mientras haya fondos.
+     * El landlord solo puede hacerlo antes de que venza su ventana de reclamo.
+     */
+    function openDispute() external onlyParticipant whenFundedWithoutDispute {
+        if (msg.sender == landlord) {
+            require(block.timestamp < claimableAt(), "Claim window closed");
+        }
 
         isDisputed = true;
+        disputeOpenedAt = block.timestamp;
 
         emit DisputeOpened(msg.sender);
     }
@@ -133,13 +249,8 @@ contract RentEscrow {
     /*
      * El arbitro decide a favor del propietario.
      */
-    function resolveToLandlord() external onlyArbiter {
-        require(isDeposited, "Deposit not made yet");
-        require(isDisputed, "No active dispute");
-        require(!isReleased, "Escrow already released");
-
-        isReleased = true;
-        isDisputed = false;
+    function resolveToLandlord() external onlyArbiter whenDisputed {
+        _close();
 
         depositToken.safeTransfer(landlord, depositAmount);
 
@@ -149,13 +260,8 @@ contract RentEscrow {
     /*
      * El arbitro decide a favor del inquilino.
      */
-    function resolveToTenant() external onlyArbiter {
-        require(isDeposited, "Deposit not made yet");
-        require(isDisputed, "No active dispute");
-        require(!isReleased, "Escrow already released");
-
-        isReleased = true;
-        isDisputed = false;
+    function resolveToTenant() external onlyArbiter whenDisputed {
+        _close();
 
         depositToken.safeTransfer(tenant, depositAmount);
 
@@ -163,9 +269,54 @@ contract RentEscrow {
     }
 
     /*
+     * El arbitro reparte el deposito (por ejemplo, daños parciales).
+     */
+    function resolveSplit(uint256 toLandlord) external onlyArbiter whenDisputed {
+        require(toLandlord <= depositAmount, "Amount exceeds deposit");
+
+        uint256 toTenant = depositAmount - toLandlord;
+        _close();
+
+        if (toLandlord > 0) depositToken.safeTransfer(landlord, toLandlord);
+        if (toTenant > 0) depositToken.safeTransfer(tenant, toTenant);
+
+        emit ResolvedSplit(msg.sender, toLandlord, toTenant);
+    }
+
+    /*
+     * Si el arbitro no resolvio en DISPUTE_TIMEOUT, el inquilino recupera
+     * el deposito: los fondos nunca quedan bloqueados para siempre.
+     */
+    function claimAfterDisputeTimeout() external onlyTenant whenDisputed {
+        require(
+            block.timestamp >= disputeOpenedAt + DISPUTE_TIMEOUT,
+            "Dispute timeout not reached"
+        );
+
+        _close();
+
+        depositToken.safeTransfer(tenant, depositAmount);
+
+        emit DisputeTimedOut(msg.sender, depositAmount);
+    }
+
+    /*
+     * Momento a partir del cual el inquilino puede reclamar sin disputa.
+     */
+    function claimableAt() public view returns (uint256) {
+        require(address(agreement) != address(0), "Agreement not linked");
+        return agreement.endDate() + CLAIM_WINDOW;
+    }
+
+    /*
      * Balance actual del contrato para debugging y tests.
      */
     function contractBalance() external view returns (uint256) {
         return depositToken.balanceOf(address(this));
+    }
+
+    function _close() private {
+        isReleased = true;
+        isDisputed = false;
     }
 }

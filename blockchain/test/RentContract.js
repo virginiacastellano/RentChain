@@ -31,6 +31,7 @@ describe("RentContract", function () {
     const ipfsDocumentHash = "ipfs://rentchain-contract-v1";
 
     const rentContract = await RentContract.connect(landlord).deploy(
+      landlord.address,
       tenant.address,
       arbiter.address,
       await escrow.getAddress(),
@@ -159,5 +160,35 @@ describe("RentContract", function () {
     await expect(rentContract.connect(tenant).acceptAsTenant()).to.be.revertedWith(
       "Agreement is not in draft state"
     );
+  });
+  it("debe invalidar las aceptaciones si el landlord cambia el documento", async function () {
+    const { rentContract, landlord, tenant, arbiter } = await deployFixture();
+
+    await rentContract.connect(tenant).acceptAsTenant();
+    await rentContract.connect(arbiter).acceptAsArbiter();
+    await rentContract.connect(landlord).updateDocumentHash("ipfs://rentchain-contract-v2");
+
+    expect(await rentContract.tenantAccepted()).to.equal(false);
+    expect(await rentContract.arbiterAccepted()).to.equal(false);
+    await expect(rentContract.connect(landlord).activateAgreement()).to.be.revertedWith(
+      "Tenant has not accepted yet"
+    );
+  });
+
+  it("no debe permitir crear un acuerdo con el mismo landlord y tenant", async function () {
+    const { escrow, landlord, arbiter } = await deployFixture();
+    const RentContract = await ethers.getContractFactory("RentContract");
+
+    await expect(
+      RentContract.deploy(
+        landlord.address,
+        landlord.address,
+        arbiter.address,
+        await escrow.getAddress(),
+        "ipfs://x",
+        1_800_000_000,
+        1_803_153_600
+      )
+    ).to.be.revertedWith("Landlord and tenant must differ");
   });
 });

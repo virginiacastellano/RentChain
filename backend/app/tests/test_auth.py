@@ -59,7 +59,7 @@ def test_auth_me_returns_current_user_when_authenticated() -> None:
     }
 
 
-def test_forgot_password_returns_reset_token() -> None:
+def test_forgot_password_does_not_expose_reset_token() -> None:
     def override_get_db():
         yield object()
 
@@ -81,10 +81,29 @@ def test_forgot_password_returns_reset_token() -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert response.json() == {
-        "message": "Password reset token generated",
-        "reset_token": "reset-token-123",
-    }
+    assert response.json() == {"message": auth_routes.FORGOT_PASSWORD_MESSAGE}
+    assert "reset-token-123" not in response.text
+
+
+def test_forgot_password_same_response_for_unknown_email() -> None:
+    def override_get_db():
+        yield object()
+
+    app.dependency_overrides[get_db] = override_get_db
+    original_request_password_reset = auth_routes.request_password_reset
+    auth_routes.request_password_reset = lambda db, email: None
+
+    try:
+        response = client.post(
+            "/auth/forgot-password",
+            json={"email": "nobody@example.com"},
+        )
+    finally:
+        auth_routes.request_password_reset = original_request_password_reset
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {"message": auth_routes.FORGOT_PASSWORD_MESSAGE}
 
 
 def test_reset_password_returns_success_message() -> None:

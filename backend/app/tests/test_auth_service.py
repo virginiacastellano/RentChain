@@ -5,7 +5,7 @@ from app.core.exceptions import BadRequestException, NotFoundException
 from app.services import auth_service
 
 
-def test_request_password_reset_raises_not_found_when_user_does_not_exist(monkeypatch) -> None:
+def test_request_password_reset_returns_none_when_user_does_not_exist(monkeypatch) -> None:
     # Simulamos que el repository no encuentra ningun usuario para ese email.
     def fake_get_user_by_email(db, email: str):
         return None
@@ -13,13 +13,8 @@ def test_request_password_reset_raises_not_found_when_user_does_not_exist(monkey
     # Reemplazamos temporalmente la funcion real por la falsa.
     monkeypatch.setattr(auth_service, "get_user_by_email", fake_get_user_by_email)
 
-    # Verificamos que el service lance la excepcion correcta.
-    with pytest.raises(NotFoundException) as exc_info:
-        auth_service.request_password_reset(db=object(), email="missing@example.com")
-
-    # Comprobamos que el mensaje y el codigo de error sean los esperados.
-    assert exc_info.value.detail == "User not found"
-    assert exc_info.value.error_code == "user_not_found"
+    # No debe lanzar error: la API no revela si el email existe.
+    assert auth_service.request_password_reset(db=object(), email="missing@example.com") is None
 
 
 def test_reset_password_raises_bad_request_when_token_is_invalid(monkeypatch) -> None:
