@@ -15,6 +15,23 @@ const REVERT_MESSAGES = {
   "Escrow already released": "La garantía ya fue liberada.",
   "Deposit already made": "La garantía ya fue depositada.",
   "Amount exceeds deposit": "El monto supera la garantía.",
+  "Release already approved": "Ya autorizaste el cobro.",
+  "Tenant already accepted": "El inquilino ya aceptó.",
+  "Arbiter already accepted": "El árbitro ya aceptó.",
+  "Agreement is not in draft state": "El acuerdo ya no está en borrador.",
+  "Deposit not made yet": "Todavía no se depositó la garantía.",
+  "No active dispute": "No hay una disputa abierta.",
+  "Fee-on-transfer tokens not supported": "El token cobra comisión por transferencia y no se puede usar como garantía.",
+  "Only landlord can call this": "Solo el propietario puede hacer esto.",
+  "Only tenant can call this": "Solo el inquilino puede hacer esto.",
+  "Only arbiter can call this": "Solo el árbitro puede hacer esto.",
+  "Only participant can call this": "Solo el propietario o el inquilino pueden hacer esto.",
+  "Landlord and tenant must differ": "El propietario y el inquilino tienen que ser wallets distintas.",
+  "Arbiter must differ": "El árbitro tiene que ser una wallet distinta de las partes.",
+  "End date must be greater than start date": "La fecha de fin tiene que ser posterior a la de inicio.",
+  "Document hash is required": "Falta la huella del documento.",
+  ERC20InsufficientBalance: "Saldo de mUSDT insuficiente.",
+  ERC20InsufficientAllowance: "Falta aprobar el gasto de mUSDT.",
 };
 
 export function explainError(error) {
@@ -22,8 +39,19 @@ export function explainError(error) {
   for (const [key, text] of Object.entries(REVERT_MESSAGES)) {
     if (raw.includes(key)) return text;
   }
-  if (raw.includes("user rejected")) return "Operación cancelada en la wallet.";
+  if (raw.includes("user rejected") || error?.code === "ACTION_REJECTED") return "Firma rechazada en la wallet: no se envió ninguna transacción.";
+  if (/ECONNREFUSED|failed to fetch|could not detect network|NETWORK_ERROR/i.test(raw)) {
+    return "No hay conexión con la blockchain local. ¿Está corriendo `npx hardhat node`?";
+  }
   return raw.replace(/^execution reverted: /, "");
+}
+
+// Enlace al explorador para redes publicas. En la red local no hay explorador.
+const EXPLORERS = { 1: "https://etherscan.io", 11155111: "https://sepolia.etherscan.io" };
+
+export function explorerTxUrl(chainId, hash) {
+  const base = EXPLORERS[chainId];
+  return base && hash ? `${base}/tx/${hash}` : null;
 }
 
 export async function loadDeployment() {

@@ -113,9 +113,12 @@ Separé el acuerdo del dinero a propósito: cada contrato tiene una sola respons
 - Solo se puede depositar con el acuerdo **activo**.
 - El propietario **no puede llevarse la garantía por su cuenta**: necesita la autorización del inquilino o la decisión del árbitro.
 - **Plazos para todo**, así ningún fondo queda bloqueado si alguien desaparece.
-- Patrón **Checks-Effects-Interactions** y `SafeERC20` de OpenZeppelin en todas las transferencias.
+- Patrón **Checks-Effects-Interactions**, `SafeERC20` y `ReentrancyGuard` de OpenZeppelin en todas las funciones que mueven fondos.
 - Se verifica que llegue el **monto exacto**, para que tokens con comisión no rompan la contabilidad.
 - No hay funciones de administrador ni forma de sacar fondos por fuera de estas reglas.
+- Cada acción de fondos se ejecuta una sola vez: los tests cubren doble ejecución, transiciones prohibidas y permisos por rol.
+
+> ⚠️ Los contratos **no tienen una auditoría profesional**. Tienen tests propios (ver abajo), pero no deben usarse con fondos reales sin una auditoría independiente.
 
 ## 🖥️ Frontend
 
@@ -123,10 +126,15 @@ dApp en **React + Vite + ethers v6**:
 
 - **Modo demo por roles:** se cambia entre Propietario, Inquilino y Escribano con un clic, usando las cuentas locales de Hardhat. No hace falta instalar nada.
 - Soporte para **MetaMask** en la red local.
-- Línea de tiempo del acuerdo, acciones disponibles según el rol y el estado, y mensajes que explican qué falta.
-- **Historial on-chain** de cada acuerdo a partir de los eventos de los contratos.
-- Botón **⏩ Adelantar 30 días** (solo en local) para probar los plazos.
-- El contrato firmado se identifica con su **huella SHA-256**, calculada en el navegador.
+- Solo muestra las acciones que el contrato permite según el **rol** y el **estado** del acuerdo, con un mensaje que explica qué falta.
+- **Validación del formulario** con las mismas reglas que el contrato: wallets válidas y distintas, monto mayor a cero, fin posterior al inicio y en el futuro, documento obligatorio.
+- **Confirmación previa** de toda acción que mueve fondos o es irreversible, con el monto y el efecto.
+- **Estado de cada transacción**: "confirmá en tu wallet" → "esperando confirmación on-chain" (con el hash) → confirmado. Solo informa éxito cuando el recibo on-chain lo confirma.
+- **Actualización en vivo**: cada bloque nuevo vuelve a leer el estado, así se ven las acciones de las otras partes sin recargar.
+- **Saldos reales**: el saldo de la wallet y el del escrow se leen del token on-chain.
+- **Documento verificable**: se registra la huella SHA-256 del PDF y cualquier parte puede verificar que su copia coincide. En borrador, el propietario puede reemplazarlo (las aceptaciones se reinician).
+- **Historial on-chain** de cada acuerdo, con el hash de cada transacción (enlace al explorador en redes públicas).
+- Botón **⏩ Adelantar 30 días**, solo en la red local de prueba, para probar los plazos.
 
 ![Historial on-chain](docs/screenshots/historial.jpg)
 
@@ -169,6 +177,42 @@ npm install
 npm run dev               # http://localhost:5173
 ```
 
+### Wallets de prueba (solo red local)
+
+`npm run deploy:local` carga **10.000 mUSDT** en tres cuentas de prueba de Hardhat, que la app usa en modo demo:
+
+| Rol | Wallet |
+|---|---|
+| Propietario | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` (cuenta #1) |
+| Inquilino | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` (cuenta #2) |
+| Árbitro | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` (cuenta #3) |
+
+Son las cuentas públicas que imprime `npx hardhat node`: **sus claves son conocidas por cualquiera** y nunca deben usarse en una red real. La app no guarda claves; en modo demo firma a través del nodo local.
+
+Para usar **MetaMask**: agregá la red `http://127.0.0.1:8545` (chainId 31337), importá una de esas cuentas y tocá *Usar MetaMask*.
+
+### Contratos en la red local
+
+En un nodo recién iniciado, el deploy siempre produce las mismas direcciones:
+
+| Contrato | Dirección |
+|---|---|
+| MockUSDT | `0x5FbDB2315678afecb367f032d93F642f64180aa3` |
+| RentChainFactory | `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512` |
+
+Cada acuerdo crea su propio `RentContract` y `RentEscrow`; sus direcciones se ven en la app. Si reiniciás el nodo, corré de nuevo `npm run deploy:local`.
+
+### Comandos
+
+| Comando (en `blockchain/`) | Qué hace |
+|---|---|
+| `npm test` | Tests de contratos |
+| `npm run node` | Nodo local de Hardhat |
+| `npm run deploy:local` | Deploy local + configuración del frontend |
+| `npm run demo` | Demo por consola en una red en memoria |
+| `npm run demo:local` | La misma demo contra el nodo local |
+| `npm run deploy:sepolia` | Deploy a testnet (requiere variables de entorno) |
+
 **Demo por consola** (no necesita nodo)
 
 ```bash
@@ -196,16 +240,20 @@ uvicorn app.main:app --reload  # http://localhost:8000/docs
 ## 🧪 Tests
 
 ```bash
-cd blockchain && npx hardhat test     # 47 tests de contratos
+cd blockchain && npx hardhat test     # 59 tests de contratos
 cd backend && python -m pytest        # 18 tests de backend
 ```
 
-- **Contratos:** acuerdo, factory, depósito, devolución, autorización de cobro, disputas, repartos, plazos, tokens con comisión y control de acceso.
+- **Contratos:** acuerdo, factory, depósito, devolución, autorización de cobro, disputas, repartos, plazos, tokens con comisión, control de acceso, doble ejecución, validaciones de entrada, reentrancia y fallos de transacción.
+- **Recorridos en el navegador:** verificados manualmente contra el nodo local (ver [`PROJECT_STATUS.md`](PROJECT_STATUS.md)).
 - **Backend:** seguridad, autenticación, recuperación de contraseña y permisos.
 
 Corren automáticamente en GitHub Actions con cada cambio.
 
 ## ⚠️ Limitaciones conocidas de la v1
+
+El estado detallado (hecho, pendiente, bloqueado y decisiones abiertas) está en [`PROJECT_STATUS.md`](PROJECT_STATUS.md).
+
 
 - **Documento:** se registra la huella SHA-256; la subida a IPFS es el próximo paso.
 - **Escribano anónimo:** la app lo muestra como "identidad reservada", pero su wallet es pública on-chain. Una reserva real requiere una capa de privacidad, como direcciones efímeras o pruebas de conocimiento cero.

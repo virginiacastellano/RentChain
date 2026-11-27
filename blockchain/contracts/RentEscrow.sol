@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /*
  * Vista minima de RentContract que necesita el escrow.
@@ -32,9 +33,10 @@ interface IRentContract {
  * - si el arbiter no resuelve en DISPUTE_TIMEOUT, el tenant recupera el deposito
  *
  * Todas las funciones que mueven dinero actualizan el estado antes de transferir
- * (checks-effects-interactions) y usan SafeERC20.
+ * (checks-effects-interactions), usan SafeERC20 y ademas son nonReentrant
+ * como defensa en profundidad.
  */
-contract RentEscrow {
+contract RentEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // Estado del acuerdo en RentContract que habilita el deposito.
@@ -168,7 +170,7 @@ contract RentEscrow {
      * El inquilino deposita exactamente el monto acordado.
      * Solo es posible con el acuerdo vinculado y activo.
      */
-    function deposit() external onlyTenant {
+    function deposit() external onlyTenant nonReentrant {
         require(address(agreement) != address(0), "Agreement not linked");
         require(agreement.status() == AGREEMENT_ACTIVE, "Agreement is not active");
         require(!isDeposited, "Deposit already made");
@@ -190,7 +192,7 @@ contract RentEscrow {
     /*
      * Flujo normal: el landlord devuelve el deposito al inquilino.
      */
-    function returnToTenant() external onlyLandlord whenFundedWithoutDispute {
+    function returnToTenant() external onlyLandlord whenFundedWithoutDispute nonReentrant {
         isReleased = true;
 
         depositToken.safeTransfer(tenant, depositAmount);
@@ -214,7 +216,7 @@ contract RentEscrow {
      * El landlord cobra el deposito, solo con autorizacion del inquilino.
      * Sin autorizacion, el camino es abrir una disputa.
      */
-    function releaseToLandlord() external onlyLandlord whenFundedWithoutDispute {
+    function releaseToLandlord() external onlyLandlord whenFundedWithoutDispute nonReentrant {
         require(tenantApprovedRelease, "Tenant has not approved the release");
 
         isReleased = true;
@@ -228,7 +230,7 @@ contract RentEscrow {
      * Si el landlord no devolvio el deposito ni abrio disputa dentro de
      * CLAIM_WINDOW despues del fin del alquiler, el inquilino lo recupera.
      */
-    function claimAfterEnd() external onlyTenant whenFundedWithoutDispute {
+    function claimAfterEnd() external onlyTenant whenFundedWithoutDispute nonReentrant {
         require(block.timestamp >= claimableAt(), "Claim window still open");
 
         isReleased = true;
@@ -256,7 +258,7 @@ contract RentEscrow {
     /*
      * El arbitro decide a favor del propietario.
      */
-    function resolveToLandlord() external onlyArbiter whenDisputed {
+    function resolveToLandlord() external onlyArbiter whenDisputed nonReentrant {
         _close();
 
         depositToken.safeTransfer(landlord, depositAmount);
@@ -267,7 +269,7 @@ contract RentEscrow {
     /*
      * El arbitro decide a favor del inquilino.
      */
-    function resolveToTenant() external onlyArbiter whenDisputed {
+    function resolveToTenant() external onlyArbiter whenDisputed nonReentrant {
         _close();
 
         depositToken.safeTransfer(tenant, depositAmount);
@@ -278,7 +280,7 @@ contract RentEscrow {
     /*
      * El arbitro reparte el deposito (por ejemplo, daños parciales).
      */
-    function resolveSplit(uint256 toLandlord) external onlyArbiter whenDisputed {
+    function resolveSplit(uint256 toLandlord) external onlyArbiter whenDisputed nonReentrant {
         require(toLandlord <= depositAmount, "Amount exceeds deposit");
 
         uint256 toTenant = depositAmount - toLandlord;
@@ -294,7 +296,7 @@ contract RentEscrow {
      * Si el arbitro no resolvio en DISPUTE_TIMEOUT, el inquilino recupera
      * el deposito: los fondos nunca quedan bloqueados para siempre.
      */
-    function claimAfterDisputeTimeout() external onlyTenant whenDisputed {
+    function claimAfterDisputeTimeout() external onlyTenant whenDisputed nonReentrant {
         require(
             block.timestamp >= disputeOpenedAt + DISPUTE_TIMEOUT,
             "Dispute timeout not reached"
